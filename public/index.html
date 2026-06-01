@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SharmaWeb Sign In</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <p class="eyebrow">SharmaWeb</p>
+        <h1>Sign in securely</h1>
+        <p class="muted">
+          Continue with Google, then complete app-level verification here. This
+          page never asks for or handles your Google password.
+        </p>
+
+        <a class="button google" href="/auth/google">Continue with Google</a>
+
+        <div class="divider"><span>or</span></div>
+
+        <form id="passkey-sign-in" class="stack">
+          <label for="email">Email for passkey sign-in</label>
+          <input
+            id="email"
+            name="email"
+            type="email"
+            autocomplete="email webauthn"
+            placeholder="you@example.com"
+            required
+          />
+          <button type="submit">Sign in with a passkey</button>
+        </form>
+
+        <p id="message" class="message" role="status"></p>
+      </section>
+
+      <section id="account" class="card hidden">
+        <h2>Your account</h2>
+        <div id="account-details"></div>
+        <div class="actions">
+          <button id="register-passkey">Register this device as a passkey</button>
+          <button id="sign-out" class="secondary">Sign out</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

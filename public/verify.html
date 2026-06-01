@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verify your sign-in</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <p class="eyebrow">Local verification</p>
+        <h1>Finish signing in</h1>
+        <p class="muted">
+          Google has already verified your Google account. SharmaWeb now checks
+          your app account here with a local passkey when one is available.
+        </p>
+
+        <div id="pending-account" class="account-row"></div>
+
+        <div class="actions">
+          <button id="verify-passkey">Verify with passkey</button>
+          <button id="complete-verification" class="secondary">
+            Complete first-time verification
+          </button>
+        </div>
+
+        <p class="note">
+          For your safety, do not enter a Google password on this site. Google
+          credentials should only be entered on Google-owned pages.
+        </p>
+        <p id="message" class="message" role="status"></p>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
