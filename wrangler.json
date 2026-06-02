@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sharmaweb-sign-in",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-06-01",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./public"
+  }
+}
