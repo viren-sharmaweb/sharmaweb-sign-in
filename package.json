@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --check server.js && node --check public/app.js && node --check src/worker.mjs",
     "start": "node server.js",
-    "build": "wrangler deploy --dry-run"
+    "build": "wrangler deploy --dry-run",
+    "generate:oidc-secrets": "node scripts/generate-oidc-secrets.mjs"
   },
   "repository": {
     "type": "git",

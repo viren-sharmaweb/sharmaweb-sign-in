@@ -86,3 +86,88 @@ For a Cloudflare deployment, configure these Worker variables/secrets:
 - `RP_ID`
 - `RP_NAME`
 - `REQUIRE_PASSKEY_AFTER_GOOGLE`
+
+## Google Workspace SSO with this app as an OIDC IdP
+
+The app can also act as a custom OIDC identity provider for Google Workspace.
+Use this when you want Google Workspace sign-ins for your domain to redirect to
+`login.sharmaweb.com` and verify users with passkeys.
+
+Important safety notes:
+
+- Keep at least one Google Workspace super admin excluded from SSO while testing.
+- The `email` claim returned by this app must match the user's primary Google
+  Workspace email address.
+- Bind a Cloudflare KV namespace as `AUTH_STORE` before production use so users
+  and passkeys persist across Worker instances.
+- First-time enrollment is controlled with `BOOTSTRAP_EMAILS` and optionally
+  `BOOTSTRAP_CODE`. Do not enable `ALLOW_DOMAIN_BOOTSTRAP=true` unless you are
+  comfortable letting any account in the domain self-enroll.
+
+### 1. Generate OIDC secrets
+
+```bash
+npm run generate:oidc-secrets
+```
+
+Add the generated values to Cloudflare:
+
+| Name | Type |
+| --- | --- |
+| `OIDC_CLIENT_ID` | Plaintext |
+| `OIDC_CLIENT_SECRET` | Secret |
+| `OIDC_PRIVATE_KEY_JWK` | Secret |
+| `BOOTSTRAP_CODE` | Secret, optional |
+
+Also add:
+
+```text
+ORIGIN=https://login.sharmaweb.com
+RP_ID=login.sharmaweb.com
+RP_NAME=SharmaWeb Sign In
+WORKSPACE_DOMAIN=sharmaweb.com
+BOOTSTRAP_EMAILS=admin@sharmaweb.com
+ALLOW_DOMAIN_BOOTSTRAP=false
+ALLOW_OIDC_WITHOUT_PASSKEY=false
+```
+
+### 2. Create the custom OIDC profile in Google Workspace Admin
+
+Go to:
+
+```text
+admin.google.com
+Security -> Authentication -> SSO with third-party IdPs
+Add OIDC profile
+```
+
+Use:
+
+```text
+Issuer URL: https://login.sharmaweb.com
+Client ID: value of OIDC_CLIENT_ID
+Client secret: value of OIDC_CLIENT_SECRET
+Change password URL: https://login.sharmaweb.com/signin.html
+```
+
+After saving, Google shows a generated **Redirect URI**. Copy that value into
+Cloudflare as:
+
+```text
+OIDC_REDIRECT_URIS=<the redirect URI Google generated>
+```
+
+Redeploy the Worker after changing variables.
+
+### 3. Assign the profile carefully
+
+Assign the OIDC profile to a small test group first. Do not assign it to every
+admin at once. Test this flow:
+
+1. Go to a Google service and enter the Workspace email.
+2. Google redirects to `https://login.sharmaweb.com/signin.html`.
+3. The user verifies with an existing passkey or bootstraps their first passkey.
+4. The app redirects back to Google with an OIDC authorization code.
+5. Google exchanges the code and receives an ID token with the matching `email`
+   claim.
+

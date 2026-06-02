@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Workspace Sign In</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient">
+      <span></span>
+      <span></span>
+      <span></span>
+    </div>
+
+    <main class="shell">
+      <section id="oidc-signin" class="card signin-card">
+        <p class="eyebrow">SharmaWeb Workspace</p>
+        <h1>Welcome back</h1>
+        <p class="muted">
+          Verify with your passkey here, then glide back to Google Workspace.
+        </p>
+
+        <div id="oidc-account" class="account-row soft-row"></div>
+
+        <div id="oidc-passkey-panel" class="motion-panel hidden">
+          <button id="oidc-passkey">Continue with passkey</button>
+        </div>
+
+        <form id="oidc-bootstrap" class="motion-panel hidden">
+          <p class="muted">
+            First time here? Create your first passkey for this Workspace
+            account.
+          </p>
+          <label id="bootstrap-code-field" for="inviteCode" class="hidden">
+            Bootstrap code
+            <input
+              id="inviteCode"
+              name="inviteCode"
+              type="password"
+              autocomplete="one-time-code"
+              placeholder="Enter the admin bootstrap code"
+            />
+          </label>
+          <button type="submit">Create passkey and continue</button>
+        </form>
+
+        <div id="oidc-finish-panel" class="motion-panel hidden">
+          <button id="oidc-finish">Continue to Google Workspace</button>
+          <button id="oidc-sign-out" class="secondary">Use a different account</button>
+        </div>
+
+        <div id="oidc-blocked-panel" class="motion-panel hidden">
+          <p class="note">
+            This account needs admin enrollment before it can use this identity
+            provider.
+          </p>
+        </div>
+
+        <p id="message" class="message" role="status"></p>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

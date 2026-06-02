@@ -5,12 +5,13 @@ import {
   verifyRegistrationResponse,
 } from '@simplewebauthn/server';
 
-const users = new Map();
-const usersByEmail = new Map();
-const usersByGoogleId = new Map();
-const credentialsById = new Map();
+const memoryUsers = new Map();
+const memoryUsersByEmail = new Map();
+const memoryUsersByGoogleId = new Map();
+const memoryCredentialsById = new Map();
 const sessionCookieName = 'sw_session';
 const textEncoder = new TextEncoder();
+let signingKeyCache;
 
 export default {
   async fetch(request, env) {
@@ -18,6 +19,26 @@ export default {
     const session = await readSession(request, env);
 
     try {
+      if (url.pathname === '/.well-known/openid-configuration') {
+        return handleOidcDiscovery(request, env);
+      }
+
+      if (url.pathname === '/.well-known/jwks.json') {
+        return handleJwks(env);
+      }
+
+      if (url.pathname === '/oidc/authorize') {
+        return handleOidcAuthorize(request, env, session);
+      }
+
+      if (url.pathname === '/oidc/token' && request.method === 'POST') {
+        return handleOidcToken(request, env);
+      }
+
+      if (url.pathname === '/oidc/userinfo' && request.method === 'GET') {
+        return handleOidcUserinfo(request, env);
+      }
+
       if (url.pathname === '/auth/google') {
         return handleGoogleStart(request, env, session);
       }
@@ -28,6 +49,18 @@ export default {
 
       if (url.pathname === '/api/session' && request.method === 'GET') {
         return handleSession(request, env, session);
+      }
+
+      if (url.pathname === '/api/oidc/context' && request.method === 'GET') {
+        return handleOidcContext(env, session);
+      }
+
+      if (url.pathname === '/api/oidc/bootstrap' && request.method === 'POST') {
+        return handleOidcBootstrap(request, env, session);
+      }
+
+      if (url.pathname === '/api/oidc/finish' && request.method === 'POST') {
+        return handleOidcFinish(request, env, session);
       }
 
       if (url.pathname === '/api/verify/complete' && request.method === 'POST') {
@@ -75,6 +108,300 @@ export default {
     }
   },
 };
+
+function handleOidcDiscovery(request, env) {
+  const issuer = originFor(request, env);
+
+  return json({
+    issuer,
+    authorization_endpoint: `${issuer}/oidc/authorize`,
+    token_endpoint: `${issuer}/oidc/token`,
+    userinfo_endpoint: `${issuer}/oidc/userinfo`,
+    jwks_uri: `${issuer}/.well-known/jwks.json`,
+    response_types_supported: ['code'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email', 'profile'],
+    token_endpoint_auth_methods_supported: [
+      'client_secret_basic',
+      'client_secret_post',
+    ],
+    claims_supported: [
+      'sub',
+      'iss',
+      'aud',
+      'exp',
+      'iat',
+      'nonce',
+      'email',
+      'email_verified',
+      'name',
+      'picture',
+      'hd',
+    ],
+  });
+}
+
+async function handleJwks(env) {
+  const { publicJwk } = await getSigningKey(env);
+  return json({ keys: [publicJwk] });
+}
+
+async function handleOidcAuthorize(request, env, session) {
+  if (!oidcConfigured(env)) {
+    return htmlError(
+      'OIDC is not configured',
+      'Add OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URIS, and OIDC_PRIVATE_KEY_JWK in Cloudflare first.',
+      501,
+    );
+  }
+
+  const url = new URL(request.url);
+  const clientId = url.searchParams.get('client_id');
+  const redirectUri = url.searchParams.get('redirect_uri');
+  const responseType = url.searchParams.get('response_type');
+  const scope = url.searchParams.get('scope') || 'openid email profile';
+  const state = url.searchParams.get('state') || '';
+  const nonce = url.searchParams.get('nonce') || '';
+  const loginHint = normalizeEmail(
+    url.searchParams.get('login_hint') || url.searchParams.get('hd') || '',
+  );
+
+  if (responseType !== 'code') {
+    return redirectWithError(redirectUri, state, 'unsupported_response_type');
+  }
+
+  if (clientId !== env.OIDC_CLIENT_ID) {
+    return htmlError('Invalid OIDC client', 'The client_id does not match this identity provider.', 400);
+  }
+
+  if (!redirectUri || !allowedRedirectUris(env).includes(redirectUri)) {
+    return htmlError(
+      'Redirect URI is not allowed',
+      'Copy the Redirect URI from Google Workspace into OIDC_REDIRECT_URIS in Cloudflare.',
+      400,
+    );
+  }
+
+  if (!scope.split(/\s+/).includes('openid')) {
+    return redirectWithError(redirectUri, state, 'invalid_scope');
+  }
+
+  const currentUser = await getSessionUser(env, session);
+
+  session.pendingOidc = {
+    clientId,
+    redirectUri,
+    scope,
+    state,
+    nonce,
+    loginHint,
+    createdAt: Date.now(),
+  };
+
+  if (currentUser && oidcUserAllowed(env, currentUser.email, loginHint)) {
+    const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, currentUser);
+    delete session.pendingOidc;
+    const headers = new Headers({ location: redirectTo });
+    await commitSessionCookie(headers, session, env, request);
+    return new Response(null, { status: 302, headers });
+  }
+
+  const headers = new Headers({ location: '/signin.html' });
+  await commitSessionCookie(headers, session, env, request);
+  return new Response(null, { status: 302, headers });
+}
+
+async function handleOidcToken(request, env) {
+  if (!oidcConfigured(env)) {
+    return oauthError('server_error', 'OIDC is not configured', 501);
+  }
+
+  const form = await request.formData();
+  const auth = parseBasicAuth(request.headers.get('authorization') || '');
+  const clientId = auth?.clientId || form.get('client_id');
+  const clientSecret = auth?.clientSecret || form.get('client_secret');
+
+  if (clientId !== env.OIDC_CLIENT_ID || clientSecret !== env.OIDC_CLIENT_SECRET) {
+    return oauthError('invalid_client', 'Invalid client credentials', 401);
+  }
+
+  if (form.get('grant_type') !== 'authorization_code') {
+    return oauthError('unsupported_grant_type', 'Only authorization_code is supported');
+  }
+
+  const authCode = await readSignedPayload(String(form.get('code') || ''), env, 'oidc_code');
+
+  if (!authCode) {
+    return oauthError('invalid_grant', 'Invalid or expired authorization code');
+  }
+
+  const redirectUri = String(form.get('redirect_uri') || '');
+
+  if (authCode.redirectUri !== redirectUri) {
+    return oauthError('invalid_grant', 'redirect_uri does not match the authorization request');
+  }
+
+  if (authCode.clientId !== clientId) {
+    return oauthError('invalid_grant', 'client_id does not match the authorization request');
+  }
+
+  const user = await loadUser(env, authCode.userId);
+
+  if (!user) {
+    return oauthError('invalid_grant', 'User no longer exists');
+  }
+
+  const issuer = issuerFor(env);
+  const now = Math.floor(Date.now() / 1000);
+  const idToken = await signJwt(
+    {
+      iss: issuer,
+      sub: user.id,
+      aud: clientId,
+      exp: now + 300,
+      iat: now,
+      auth_time: authCode.authTime || now,
+      nonce: authCode.nonce || undefined,
+      email: user.email,
+      email_verified: true,
+      name: user.displayName || user.email,
+      picture: user.photo || undefined,
+      hd: workspaceDomainFor(env) || undefined,
+    },
+    env,
+  );
+  const accessToken = await createSignedPayload(
+    {
+      type: 'oidc_access_token',
+      userId: user.id,
+      clientId,
+      exp: Date.now() + 300000,
+    },
+    env,
+  );
+
+  return json({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: 300,
+    scope: authCode.scope || 'openid email profile',
+    id_token: idToken,
+  });
+}
+
+async function handleOidcUserinfo(request, env) {
+  const authorization = request.headers.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ')
+    ? authorization.slice('Bearer '.length)
+    : '';
+  const accessToken = await readSignedPayload(token, env, 'oidc_access_token');
+
+  if (!accessToken) {
+    return oauthError('invalid_token', 'Missing or invalid access token', 401);
+  }
+
+  const user = await loadUser(env, accessToken.userId);
+
+  if (!user) {
+    return oauthError('invalid_token', 'User no longer exists', 401);
+  }
+
+  return json(oidcClaimsForUser(user, env));
+}
+
+async function handleOidcContext(env, session) {
+  const pendingOidc = session.pendingOidc;
+  const currentUser = await getSessionUser(env, session);
+
+  if (!pendingOidc) {
+    return json({ pending: false, authenticated: Boolean(currentUser) });
+  }
+
+  const hint = normalizeEmail(pendingOidc.loginHint || currentUser?.email || '');
+  const user = hint ? await findUserByEmail(env, hint) : null;
+  const bootstrapAllowed = hint ? bootstrapAllowedForEmail(env, hint) : false;
+
+  return json({
+    pending: true,
+    authenticated: Boolean(currentUser),
+    loginHint: hint,
+    workspaceDomain: workspaceDomainFor(env),
+    user: currentUser ? serializeUser(currentUser) : null,
+    hasPasskeys: Boolean(user?.passkeys.length),
+    canBootstrap: !user && bootstrapAllowed,
+    bootstrapRequiresCode: Boolean(env.BOOTSTRAP_CODE),
+    passkeyRequired: Boolean(user?.passkeys.length),
+  });
+}
+
+async function handleOidcBootstrap(request, env, session) {
+  const pendingOidc = session.pendingOidc;
+
+  if (!pendingOidc) {
+    return json({ error: 'No pending Workspace sign-in' }, 401);
+  }
+
+  const email = normalizeEmail(pendingOidc.loginHint || '');
+
+  if (!email) {
+    return json({ error: 'Google did not provide a login_hint for this sign-in' }, 400);
+  }
+
+  if (!bootstrapAllowedForEmail(env, email)) {
+    return json({ error: 'This email is not allowed to bootstrap a Workspace passkey' }, 403);
+  }
+
+  const payload = await request.json().catch(() => ({}));
+
+  if (env.BOOTSTRAP_CODE && payload.inviteCode !== env.BOOTSTRAP_CODE) {
+    return json({ error: 'The bootstrap code is incorrect' }, 403);
+  }
+
+  let user = await findUserByEmail(env, email);
+
+  if (!user) {
+    user = {
+      id: crypto.randomUUID(),
+      email,
+      displayName: email,
+      photo: undefined,
+      passkeys: [],
+      createdAt: new Date().toISOString(),
+    };
+    await saveUser(env, user);
+  }
+
+  establishSession(session, user);
+  session.pendingOidc = pendingOidc;
+
+  const headers = new Headers({ 'content-type': 'application/json' });
+  await commitSessionCookie(headers, session, env, request);
+  return new Response(JSON.stringify({ user: serializeUser(user) }), { headers });
+}
+
+async function handleOidcFinish(request, env, session) {
+  const pendingOidc = session.pendingOidc;
+  const user = await getSessionUser(env, session);
+
+  if (!pendingOidc || !user) {
+    return json({ error: 'No pending Workspace sign-in to finish' }, 401);
+  }
+
+  if (!oidcUserAllowed(env, user.email, pendingOidc.loginHint)) {
+    return json({ error: 'Signed-in user does not match this Workspace sign-in' }, 403);
+  }
+
+  if (user.passkeys.length === 0 && env.ALLOW_OIDC_WITHOUT_PASSKEY !== 'true') {
+    return json({ error: 'Register a passkey before finishing Workspace sign-in' }, 403);
+  }
+
+  const redirectTo = await buildOidcRedirect(request, env, pendingOidc, user);
+  delete session.pendingOidc;
+  const headers = new Headers({ 'content-type': 'application/json' });
+  await commitSessionCookie(headers, session, env, request);
+  return new Response(JSON.stringify({ redirectTo }), { headers });
+}
 
 async function handleGoogleStart(request, env, session) {
   if (!googleConfigured(env)) {
@@ -146,13 +473,13 @@ async function handleGoogleCallback(request, env, session) {
   }
 
   const profile = await profileResponse.json();
-  const email = profile.email?.toLowerCase();
+  const email = normalizeEmail(profile.email || '');
 
   if (!email) {
     return redirect('/?error=google_email');
   }
 
-  const user = upsertGoogleUser({
+  const user = await upsertGoogleUser(env, {
     googleId: profile.sub,
     email,
     displayName: profile.name || email,
@@ -169,15 +496,16 @@ async function handleGoogleCallback(request, env, session) {
   return new Response(null, { status: 302, headers });
 }
 
-function handleSession(request, env, session) {
-  const user = getSessionUser(session);
+async function handleSession(request, env, session) {
+  const user = await getSessionUser(env, session);
   const pendingUser = session.pendingUserId
-    ? users.get(session.pendingUserId)
+    ? await loadUser(env, session.pendingUserId)
     : null;
 
   return json({
     authenticated: Boolean(user),
     googleConfigured: googleConfigured(env),
+    oidcConfigured: oidcConfigured(env),
     rpName: rpNameFor(env),
     requirePasskeyAfterGoogle: requirePasskeyAfterGoogle(env),
     user: user ? serializeUser(user) : null,
@@ -193,7 +521,7 @@ function handleSession(request, env, session) {
 
 async function handleCompleteVerification(request, env, session) {
   const pendingUser = session.pendingUserId
-    ? users.get(session.pendingUserId)
+    ? await loadUser(env, session.pendingUserId)
     : null;
 
   if (!pendingUser) {
@@ -219,7 +547,7 @@ async function handleCompleteVerification(request, env, session) {
 }
 
 async function handleRegisterOptions(request, env, session) {
-  const user = getSessionUser(session);
+  const user = await getSessionUser(env, session);
 
   if (!user) {
     return json({ error: 'Sign in before registering a passkey' }, 401);
@@ -249,7 +577,7 @@ async function handleRegisterOptions(request, env, session) {
 }
 
 async function handleRegisterVerify(request, env, session) {
-  const user = getSessionUser(session);
+  const user = await getSessionUser(env, session);
 
   if (!user) {
     return json({ error: 'Sign in before registering a passkey' }, 401);
@@ -270,16 +598,16 @@ async function handleRegisterVerify(request, env, session) {
     );
   }
 
-  const credential = verification.registrationInfo.credential;
+  const credential = normalizeCredential(verification.registrationInfo.credential);
 
-  if (!credentialsById.has(credential.id)) {
+  if (!(await findCredential(env, credential.id))) {
     const passkey = {
       credential,
       createdAt: new Date().toISOString(),
     };
 
     user.passkeys.push(passkey);
-    credentialsById.set(credential.id, { userId: user.id, passkey });
+    await saveUser(env, user);
   }
 
   delete session.currentRegistrationChallenge;
@@ -292,7 +620,7 @@ async function handleRegisterVerify(request, env, session) {
 
 async function handleAuthenticateOptions(request, env, session) {
   const payload = await request.json().catch(() => ({}));
-  const user = findUserForPasskeyAuthentication(session, payload);
+  const user = await findUserForPasskeyAuthentication(env, session, payload);
 
   if (!user) {
     return json({ error: 'No account found for passkey authentication' }, 404);
@@ -321,9 +649,9 @@ async function handleAuthenticateOptions(request, env, session) {
 async function handleAuthenticateVerify(request, env, session) {
   const body = await request.json();
   const expectedUser = session.currentAuthenticationUserId
-    ? users.get(session.currentAuthenticationUserId)
+    ? await loadUser(env, session.currentAuthenticationUserId)
     : null;
-  const credentialRecord = credentialsById.get(body.id);
+  const credentialRecord = await findCredential(env, body.id);
 
   if (
     !expectedUser ||
@@ -351,9 +679,20 @@ async function handleAuthenticateVerify(request, env, session) {
 
   credentialRecord.passkey.credential.counter =
     verification.authenticationInfo.newCounter;
+  await saveUser(env, expectedUser);
   establishSession(session, expectedUser);
   delete session.currentAuthenticationChallenge;
   delete session.currentAuthenticationUserId;
+
+  if (session.pendingOidc) {
+    const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, expectedUser);
+    delete session.pendingOidc;
+    const headers = new Headers({ 'content-type': 'application/json' });
+    await commitSessionCookie(headers, session, env, request);
+    return new Response(JSON.stringify({ user: serializeUser(expectedUser), redirectTo }), {
+      headers,
+    });
+  }
 
   const headers = new Headers({ 'content-type': 'application/json' });
   await commitSessionCookie(headers, session, env, request);
@@ -362,15 +701,40 @@ async function handleAuthenticateVerify(request, env, session) {
   });
 }
 
-function upsertGoogleUser(profile) {
+async function buildOidcRedirect(request, env, pendingOidc, user) {
+  const code = await createSignedPayload(
+    {
+      type: 'oidc_code',
+      userId: user.id,
+      clientId: pendingOidc.clientId,
+      redirectUri: pendingOidc.redirectUri,
+      scope: pendingOidc.scope,
+      nonce: pendingOidc.nonce,
+      authTime: Math.floor(Date.now() / 1000),
+      exp: Date.now() + 300000,
+    },
+    env,
+  );
+  const redirectUrl = new URL(pendingOidc.redirectUri);
+  redirectUrl.searchParams.set('code', code);
+
+  if (pendingOidc.state) {
+    redirectUrl.searchParams.set('state', pendingOidc.state);
+  }
+
+  return redirectUrl.toString();
+}
+
+async function upsertGoogleUser(env, profile) {
   const existing =
-    usersByGoogleId.get(profile.googleId) || usersByEmail.get(profile.email);
+    (profile.googleId ? await findUserByGoogleId(env, profile.googleId) : null) ||
+    (await findUserByEmail(env, profile.email));
 
   if (existing) {
     existing.googleId = profile.googleId;
     existing.displayName = profile.displayName || existing.displayName;
     existing.photo = profile.photo || existing.photo;
-    usersByGoogleId.set(profile.googleId, existing);
+    await saveUser(env, existing);
     return existing;
   }
 
@@ -384,14 +748,12 @@ function upsertGoogleUser(profile) {
     createdAt: new Date().toISOString(),
   };
 
-  users.set(user.id, user);
-  usersByEmail.set(user.email, user);
-  usersByGoogleId.set(user.googleId, user);
+  await saveUser(env, user);
   return user;
 }
 
-function getSessionUser(session) {
-  return session.userId ? users.get(session.userId) : null;
+async function getSessionUser(env, session) {
+  return session.userId ? loadUser(env, session.userId) : null;
 }
 
 function establishSession(session, user) {
@@ -400,13 +762,176 @@ function establishSession(session, user) {
   delete session.pendingProvider;
 }
 
-function findUserForPasskeyAuthentication(session, payload) {
+async function findUserForPasskeyAuthentication(env, session, payload) {
   if (session.pendingUserId) {
-    return users.get(session.pendingUserId);
+    return loadUser(env, session.pendingUserId);
   }
 
-  const email = String(payload.email || '').trim().toLowerCase();
-  return email ? usersByEmail.get(email) : null;
+  if (session.pendingOidc?.loginHint) {
+    return findUserByEmail(env, session.pendingOidc.loginHint);
+  }
+
+  const email = normalizeEmail(payload.email || '');
+  return email ? findUserByEmail(env, email) : null;
+}
+
+async function loadUser(env, userId) {
+  if (!userId) {
+    return null;
+  }
+
+  if (env.AUTH_STORE) {
+    const stored = await env.AUTH_STORE.get(`user:${userId}`, 'json');
+    return stored ? deserializeUser(stored) : null;
+  }
+
+  return memoryUsers.get(userId) || null;
+}
+
+async function findUserByEmail(env, email) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail) {
+    return null;
+  }
+
+  if (env.AUTH_STORE) {
+    const userId = await env.AUTH_STORE.get(`email:${normalizedEmail}`);
+    return userId ? loadUser(env, userId) : null;
+  }
+
+  return memoryUsersByEmail.get(normalizedEmail) || null;
+}
+
+async function findUserByGoogleId(env, googleId) {
+  if (!googleId) {
+    return null;
+  }
+
+  if (env.AUTH_STORE) {
+    const userId = await env.AUTH_STORE.get(`google:${googleId}`);
+    return userId ? loadUser(env, userId) : null;
+  }
+
+  return memoryUsersByGoogleId.get(googleId) || null;
+}
+
+async function findCredential(env, credentialId) {
+  if (!credentialId) {
+    return null;
+  }
+
+  if (env.AUTH_STORE) {
+    const userId = await env.AUTH_STORE.get(`credential:${credentialId}`);
+    const user = userId ? await loadUser(env, userId) : null;
+    const passkey = user?.passkeys.find(
+      (candidate) => candidate.credential.id === credentialId,
+    );
+    return user && passkey ? { userId: user.id, passkey } : null;
+  }
+
+  return memoryCredentialsById.get(credentialId) || null;
+}
+
+async function saveUser(env, user) {
+  const normalizedUser = {
+    ...user,
+    email: normalizeEmail(user.email),
+    passkeys: user.passkeys.map((passkey) => ({
+      ...passkey,
+      credential: normalizeCredential(passkey.credential),
+    })),
+  };
+
+  if (env.AUTH_STORE) {
+    await env.AUTH_STORE.put(
+      `user:${normalizedUser.id}`,
+      JSON.stringify(serializeUserForStorage(normalizedUser)),
+    );
+    await env.AUTH_STORE.put(`email:${normalizedUser.email}`, normalizedUser.id);
+
+    if (normalizedUser.googleId) {
+      await env.AUTH_STORE.put(`google:${normalizedUser.googleId}`, normalizedUser.id);
+    }
+
+    await Promise.all(
+      normalizedUser.passkeys.map((passkey) =>
+        env.AUTH_STORE.put(`credential:${passkey.credential.id}`, normalizedUser.id),
+      ),
+    );
+    return normalizedUser;
+  }
+
+  memoryUsers.set(normalizedUser.id, normalizedUser);
+  memoryUsersByEmail.set(normalizedUser.email, normalizedUser);
+
+  if (normalizedUser.googleId) {
+    memoryUsersByGoogleId.set(normalizedUser.googleId, normalizedUser);
+  }
+
+  for (const passkey of normalizedUser.passkeys) {
+    memoryCredentialsById.set(passkey.credential.id, {
+      userId: normalizedUser.id,
+      passkey,
+    });
+  }
+
+  return normalizedUser;
+}
+
+function serializeUserForStorage(user) {
+  return {
+    ...user,
+    passkeys: user.passkeys.map((passkey) => ({
+      ...passkey,
+      credential: {
+        ...passkey.credential,
+        publicKey: bytesToBase64url(toUint8Array(passkey.credential.publicKey)),
+      },
+    })),
+  };
+}
+
+function deserializeUser(user) {
+  return {
+    ...user,
+    passkeys: (user.passkeys || []).map((passkey) => ({
+      ...passkey,
+      credential: {
+        ...passkey.credential,
+        publicKey: base64urlToBytes(passkey.credential.publicKey),
+      },
+    })),
+  };
+}
+
+function normalizeCredential(credential) {
+  return {
+    id: credential.id,
+    publicKey: toUint8Array(credential.publicKey),
+    counter: credential.counter || 0,
+    transports: credential.transports || [],
+  };
+}
+
+function toUint8Array(value) {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (Array.isArray(value)) {
+    return new Uint8Array(value);
+  }
+
+  if (typeof value === 'string') {
+    return base64urlToBytes(value);
+  }
+
+  return new Uint8Array(value || []);
 }
 
 function serializeUser(user) {
@@ -417,6 +942,57 @@ function serializeUser(user) {
     photo: user.photo,
     passkeyCount: user.passkeys.length,
   };
+}
+
+function oidcClaimsForUser(user, env) {
+  return {
+    sub: user.id,
+    email: user.email,
+    email_verified: true,
+    name: user.displayName || user.email,
+    picture: user.photo || undefined,
+    hd: workspaceDomainFor(env) || undefined,
+  };
+}
+
+function oidcUserAllowed(env, userEmail, loginHint) {
+  const normalizedUserEmail = normalizeEmail(userEmail);
+  const normalizedLoginHint = normalizeEmail(loginHint || '');
+  const workspaceDomain = workspaceDomainFor(env);
+
+  if (!normalizedUserEmail) {
+    return false;
+  }
+
+  if (normalizedLoginHint && normalizedLoginHint !== normalizedUserEmail) {
+    return false;
+  }
+
+  return !workspaceDomain || normalizedUserEmail.endsWith(`@${workspaceDomain}`);
+}
+
+function bootstrapAllowedForEmail(env, email) {
+  const normalizedEmail = normalizeEmail(email);
+  const allowedEmails = csv(env.BOOTSTRAP_EMAILS).map(normalizeEmail);
+  const workspaceDomain = workspaceDomainFor(env);
+
+  if (!normalizedEmail) {
+    return false;
+  }
+
+  if (allowedEmails.includes(normalizedEmail)) {
+    return true;
+  }
+
+  if (env.ALLOW_DOMAIN_BOOTSTRAP === 'true' && workspaceDomain) {
+    return normalizedEmail.endsWith(`@${workspaceDomain}`);
+  }
+
+  return false;
+}
+
+function oidcConfigured(env) {
+  return Boolean(env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && env.OIDC_REDIRECT_URIS);
 }
 
 function googleConfigured(env) {
@@ -431,6 +1007,10 @@ function originFor(request, env) {
   return env.ORIGIN || new URL(request.url).origin;
 }
 
+function issuerFor(env) {
+  return env.ORIGIN || 'https://login.sharmaweb.com';
+}
+
 function rpIDFor(request, env) {
   return env.RP_ID || new URL(originFor(request, env)).hostname;
 }
@@ -439,14 +1019,78 @@ function rpNameFor(env) {
   return env.RP_NAME || 'SharmaWeb Sign In';
 }
 
+function workspaceDomainFor(env) {
+  return String(env.WORKSPACE_DOMAIN || '').trim().toLowerCase();
+}
+
+function allowedRedirectUris(env) {
+  return csv(env.OIDC_REDIRECT_URIS);
+}
+
+function csv(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function parseBasicAuth(header) {
+  if (!header.startsWith('Basic ')) {
+    return null;
+  }
+
+  const decoded = new TextDecoder().decode(base64ToBytes(header.slice('Basic '.length)));
+  const separatorIndex = decoded.indexOf(':');
+
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  return {
+    clientId: decoded.slice(0, separatorIndex),
+    clientSecret: decoded.slice(separatorIndex + 1),
+  };
+}
+
 function redirect(location) {
   return new Response(null, { status: 302, headers: { location } });
+}
+
+function redirectWithError(redirectUri, state, error) {
+  if (!redirectUri) {
+    return oauthError(error, error, 400);
+  }
+
+  const url = new URL(redirectUri);
+  url.searchParams.set('error', error);
+
+  if (state) {
+    url.searchParams.set('state', state);
+  }
+
+  return redirect(url.toString());
 }
 
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { 'content-type': 'application/json' },
+  });
+}
+
+function oauthError(error, description, status = 400) {
+  return json({ error, error_description: description }, status);
+}
+
+function htmlError(title, message, status = 400) {
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/styles.css"></head><body><main class="shell"><section class="card"><p class="eyebrow">Configuration needed</p><h1>${escapeHtml(title)}</h1><p class="muted">${escapeHtml(message)}</p></section></main></body></html>`;
+  return new Response(body, {
+    status,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
   });
 }
 
@@ -459,33 +1103,16 @@ async function readSession(request, env) {
     return {};
   }
 
-  const [payload, signature] = cookie.split('.');
-
-  if (!payload || !signature) {
-    return {};
-  }
-
-  const expectedSignature = await sign(payload, env);
-
-  if (signature !== expectedSignature) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(new TextDecoder().decode(base64urlToBytes(payload)));
-  } catch (_error) {
-    return {};
-  }
+  return (await readSignedPayload(cookie, env, 'session')) || {};
 }
 
 async function commitSessionCookie(headers, session, env, request) {
-  const payload = bytesToBase64url(textEncoder.encode(JSON.stringify(session)));
-  const signature = await sign(payload, env);
+  const payload = await createSignedPayload({ type: 'session', ...session }, env);
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
 
   headers.append(
     'set-cookie',
-    `${sessionCookieName}=${payload}.${signature}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${secure}`,
+    `${sessionCookieName}=${payload}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${secure}`,
   );
 }
 
@@ -497,7 +1124,43 @@ function clearSessionCookie(headers, request) {
   );
 }
 
-async function sign(value, env) {
+async function createSignedPayload(payload, env) {
+  const body = bytesToBase64url(textEncoder.encode(JSON.stringify(payload)));
+  const signature = await signHmac(body, env);
+  return `${body}.${signature}`;
+}
+
+async function readSignedPayload(value, env, expectedType) {
+  const [body, signature] = String(value || '').split('.');
+
+  if (!body || !signature) {
+    return null;
+  }
+
+  const expectedSignature = await signHmac(body, env);
+
+  if (signature !== expectedSignature) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(base64urlToBytes(body)));
+
+    if (expectedType && payload.type !== expectedType) {
+      return null;
+    }
+
+    if (payload.exp && Date.now() > payload.exp) {
+      return null;
+    }
+
+    return payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function signHmac(value, env) {
   const secret = env.SESSION_SECRET || 'dev-secret-change-me';
   const key = await crypto.subtle.importKey(
     'raw',
@@ -508,6 +1171,85 @@ async function sign(value, env) {
   );
   const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(value));
   return bytesToBase64url(new Uint8Array(signature));
+}
+
+async function signJwt(payload, env) {
+  const { privateKey, publicJwk } = await getSigningKey(env);
+  const header = {
+    alg: 'RS256',
+    typ: 'JWT',
+    kid: publicJwk.kid,
+  };
+  const encodedHeader = bytesToBase64url(textEncoder.encode(JSON.stringify(header)));
+  const encodedPayload = bytesToBase64url(textEncoder.encode(JSON.stringify(stripUndefined(payload))));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    privateKey,
+    textEncoder.encode(signingInput),
+  );
+
+  return `${signingInput}.${bytesToBase64url(new Uint8Array(signature))}`;
+}
+
+async function getSigningKey(env) {
+  const cacheKey = env.OIDC_PRIVATE_KEY_JWK || '__ephemeral__';
+
+  if (signingKeyCache?.cacheKey === cacheKey) {
+    return signingKeyCache;
+  }
+
+  if (env.OIDC_PRIVATE_KEY_JWK) {
+    const jwk = JSON.parse(env.OIDC_PRIVATE_KEY_JWK);
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      jwk,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const publicJwk = publicJwkFromPrivate(jwk);
+    signingKeyCache = { cacheKey, privateKey, publicJwk };
+    return signingKeyCache;
+  }
+
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify'],
+  );
+  const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  publicJwk.alg = 'RS256';
+  publicJwk.use = 'sig';
+  publicJwk.kid = 'dev-ephemeral';
+  signingKeyCache = {
+    cacheKey,
+    privateKey: keyPair.privateKey,
+    publicJwk,
+  };
+  return signingKeyCache;
+}
+
+function publicJwkFromPrivate(jwk) {
+  return {
+    kty: jwk.kty,
+    n: jwk.n,
+    e: jwk.e,
+    alg: jwk.alg || 'RS256',
+    use: 'sig',
+    kid: jwk.kid || 'workspace-sso',
+  };
+}
+
+function stripUndefined(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([_key, entryValue]) => entryValue !== undefined),
+  );
 }
 
 function parseCookies(header) {
@@ -544,7 +1286,11 @@ function base64urlToBytes(value) {
     base64.length + ((4 - (base64.length % 4)) % 4),
     '=',
   );
-  const binary = atob(padded);
+  return base64ToBytes(padded);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
 
   for (let i = 0; i < binary.length; i += 1) {
@@ -552,4 +1298,13 @@ function base64urlToBytes(value) {
   }
 
   return bytes;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
