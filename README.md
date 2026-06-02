@@ -66,3 +66,23 @@ with its user, public key, counter, transports, and creation timestamp.
 Set `REQUIRE_PASSKEY_AFTER_GOOGLE=true` if every Google sign-in must be followed
 by passkey verification. Leave it `false` to allow first-time users to complete
 local verification and then register their first passkey.
+
+## Cloudflare Workers build
+
+The repository includes `wrangler.json` and `src/worker.mjs` so Cloudflare
+Workers Builds has a deployable entrypoint. Run the same dry-run build locally
+with:
+
+```bash
+npm run build
+```
+
+For a Cloudflare deployment, configure these Worker variables/secrets:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `SESSION_SECRET`
+- `ORIGIN`
+- `RP_ID`
+- `RP_NAME`
+- `REQUIRE_PASSKEY_AFTER_GOOGLE`

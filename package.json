@@ -4,8 +4,9 @@
   "description": "Safe Google OAuth and passkey sign-in demo",
   "main": "server.js",
   "scripts": {
-    "test": "node --check server.js",
-    "start": "node server.js"
+    "test": "node --check server.js && node --check public/app.js && node --check src/worker.mjs",
+    "start": "node server.js",
+    "build": "wrangler deploy --dry-run"
   },
   "repository": {
     "type": "git",
@@ -25,5 +26,8 @@
     "express-session": "^1.19.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.97.0"
   }
 }
