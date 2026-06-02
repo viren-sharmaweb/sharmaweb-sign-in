@@ -1,12 +1,21 @@
 const message = document.querySelector('#message');
 
+let oidcContext = null;
+
 document.addEventListener('DOMContentLoaded', () => {
   void hydratePage();
   bindHomePage();
   bindVerifyPage();
+  bindOidcPage();
 });
 
 async function hydratePage() {
+  if (document.querySelector('#oidc-signin')) {
+    oidcContext = await request('/api/oidc/context');
+    renderOidcState(oidcContext);
+    return;
+  }
+
   const session = await request('/api/session');
 
   if (document.querySelector('#account')) {
@@ -82,6 +91,60 @@ function bindVerifyPage() {
   });
 }
 
+function bindOidcPage() {
+  const passkeyButton = document.querySelector('#oidc-passkey');
+  const bootstrapForm = document.querySelector('#oidc-bootstrap');
+  const finishButton = document.querySelector('#oidc-finish');
+  const signOutButton = document.querySelector('#oidc-sign-out');
+
+  passkeyButton?.addEventListener('click', async () => {
+    setMessage('Glide through your passkey prompt to continue...');
+
+    try {
+      const result = await authenticateWithPasskey({});
+      redirectIfPresent(result);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  });
+
+  bootstrapForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setMessage('Creating your protected Workspace session...');
+
+    try {
+      const inviteCode = new FormData(bootstrapForm).get('inviteCode') || '';
+      await request('/api/oidc/bootstrap', {
+        method: 'POST',
+        body: JSON.stringify({ inviteCode }),
+      });
+      setMessage('Now register a passkey for future Workspace sign-ins...');
+      await registerPasskey();
+      const result = await finishOidcSignIn();
+      redirectIfPresent(result);
+    } catch (error) {
+      setMessage(error.message, true);
+      await hydratePage();
+    }
+  });
+
+  finishButton?.addEventListener('click', async () => {
+    setMessage('Finishing Workspace sign-in...');
+
+    try {
+      const result = await finishOidcSignIn();
+      redirectIfPresent(result);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  });
+
+  signOutButton?.addEventListener('click', async () => {
+    await request('/api/sign-out', { method: 'POST' });
+    window.location.reload();
+  });
+}
+
 function renderHomeState(session) {
   const account = document.querySelector('#account');
   const accountDetails = document.querySelector('#account-details');
@@ -145,6 +208,57 @@ function renderVerifyState(session) {
   }
 }
 
+function renderOidcState(context) {
+  const account = document.querySelector('#oidc-account');
+  const passkeyPanel = document.querySelector('#oidc-passkey-panel');
+  const bootstrapPanel = document.querySelector('#oidc-bootstrap-panel');
+  const finishPanel = document.querySelector('#oidc-finish-panel');
+  const blockedPanel = document.querySelector('#oidc-blocked-panel');
+  const codeField = document.querySelector('#bootstrap-code-field');
+
+  if (!context.pending) {
+    setMessage('No Workspace sign-in is waiting. Start again from Google.');
+    hide(passkeyPanel, bootstrapPanel, finishPanel);
+    show(blockedPanel);
+    return;
+  }
+
+  account.innerHTML = `
+    <div class="identity-orb">${escapeHtml((context.loginHint || '?').slice(0, 1))}</div>
+    <div>
+      <strong>${escapeHtml(context.loginHint || 'Workspace user')}</strong>
+      <span>${escapeHtml(context.workspaceDomain || 'Google Workspace')}</span>
+    </div>
+  `;
+
+  hide(passkeyPanel, bootstrapPanel, finishPanel, blockedPanel);
+
+  if (context.authenticated && context.user?.passkeyCount > 0) {
+    show(finishPanel);
+    setMessage('You are verified. Continue back to Google Workspace.');
+    return;
+  }
+
+  if (context.hasPasskeys) {
+    show(passkeyPanel);
+    setMessage('Use your passkey to continue to Google Workspace.');
+    return;
+  }
+
+  if (context.canBootstrap) {
+    codeField.classList.toggle('hidden', !context.bootstrapRequiresCode);
+    show(bootstrapPanel);
+    setMessage('Create your first passkey for this Workspace account.');
+    return;
+  }
+
+  show(blockedPanel);
+  setMessage(
+    'This account is not enrolled yet. Ask an admin to add it to BOOTSTRAP_EMAILS or enable domain bootstrap.',
+    true,
+  );
+}
+
 async function registerPasskey() {
   ensureWebAuthn();
 
@@ -184,6 +298,10 @@ async function authenticateWithPasskey(payload) {
     method: 'POST',
     body: JSON.stringify(serializeAuthenticationCredential(credential)),
   });
+}
+
+function finishOidcSignIn() {
+  return request('/api/oidc/finish', { method: 'POST' });
 }
 
 function prepareCreationOptions(options) {
@@ -252,7 +370,7 @@ async function request(url, options = {}) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || 'Request failed');
+    throw new Error(payload.error || payload.error_description || 'Request failed');
   }
 
   return payload;
@@ -299,6 +417,24 @@ function setMessage(text, isError = false) {
 
   message.textContent = text;
   message.classList.toggle('error', isError);
+}
+
+function redirectIfPresent(result) {
+  if (result?.redirectTo) {
+    window.location.href = result.redirectTo;
+  }
+}
+
+function show(...elements) {
+  for (const element of elements) {
+    element?.classList.remove('hidden');
+  }
+}
+
+function hide(...elements) {
+  for (const element of elements) {
+    element?.classList.add('hidden');
+  }
 }
 
 function avatarMarkup(user) {
