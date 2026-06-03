@@ -328,7 +328,9 @@ async function handleOidcContext(env, session) {
   }
 
   const hint = normalizeEmail(pendingOidc.loginHint || currentUser?.email || '');
-  const user = hint ? await findUserByEmail(env, hint) : null;
+  const user =
+    (hint ? await findUserByEmail(env, hint) : null) ||
+    (hint && normalizeEmail(currentUser?.email) === hint ? currentUser : null);
   const bootstrapAllowed = hint ? bootstrapAllowedForEmail(env, hint) : false;
   const activeUser = currentUser || user;
 
@@ -337,6 +339,7 @@ async function handleOidcContext(env, session) {
     authenticated: Boolean(currentUser),
     loginHint: hint,
     workspaceDomain: workspaceDomainFor(env),
+    storeConfigured: Boolean(env.AUTH_STORE),
     user: currentUser ? serializeUser(currentUser) : null,
     hasPasskeys: Boolean(user?.passkeys.length),
     canBootstrap: !user && bootstrapAllowed,
@@ -623,6 +626,7 @@ async function handleRegisterVerify(request, env, session) {
     await saveUser(env, user);
   }
 
+  session.user = serializeUserForStorage(user);
   delete session.currentRegistrationChallenge;
   const headers = new Headers({ 'content-type': 'application/json' });
   await commitSessionCookie(headers, session, env, request);
@@ -664,7 +668,9 @@ async function handleAuthenticateVerify(request, env, session) {
   const expectedUser = session.currentAuthenticationUserId
     ? await loadUser(env, session.currentAuthenticationUserId)
     : null;
-  const credentialRecord = await findCredential(env, body.id);
+  const credentialRecord =
+    (await findCredential(env, body.id)) ||
+    findCredentialForUser(expectedUser, body.id);
 
   if (
     !expectedUser ||
@@ -781,11 +787,22 @@ async function upsertGoogleUser(env, profile) {
 }
 
 async function getSessionUser(env, session) {
-  return session.userId ? loadUser(env, session.userId) : null;
+  if (!session.userId) {
+    return null;
+  }
+
+  const storedUser = await loadUser(env, session.userId);
+
+  if (storedUser) {
+    return storedUser;
+  }
+
+  return session.user ? deserializeUser(session.user) : null;
 }
 
 function establishSession(session, user) {
   session.userId = user.id;
+  session.user = serializeUserForStorage(user);
   delete session.pendingUserId;
   delete session.pendingProvider;
 }
@@ -859,6 +876,14 @@ async function findCredential(env, credentialId) {
   }
 
   return memoryCredentialsById.get(credentialId) || null;
+}
+
+function findCredentialForUser(user, credentialId) {
+  const passkey = user?.passkeys.find(
+    (candidate) => candidate.credential.id === credentialId,
+  );
+
+  return user && passkey ? { userId: user.id, passkey } : null;
 }
 
 async function saveUser(env, user) {
