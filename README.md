@@ -155,9 +155,10 @@ Cloudflare as:
 
 ```text
 OIDC_REDIRECT_URIS=<the redirect URI Google generated>
+OIDC_SUB_CLAIM=email
 ```
 
-Redeploy the Worker after changing variables.
+Redeploy the Worker after changing variables. By default, the OIDC `sub` claim is the user's Workspace email so Google can match `sub` and `email` to the same account. Set `OIDC_SUB_CLAIM=id` only if you need an opaque internal subject.
 
 
 ### Admin review controls

@@ -119,6 +119,7 @@ function handleOidcDiscovery(request, env) {
     userinfo_endpoint: `${issuer}/oidc/userinfo`,
     jwks_uri: `${issuer}/.well-known/jwks.json`,
     response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
     subject_types_supported: ['public'],
     id_token_signing_alg_values_supported: ['RS256'],
     scopes_supported: ['openid', 'email', 'profile'],
@@ -263,7 +264,7 @@ async function handleOidcToken(request, env) {
   const idToken = await signJwt(
     {
       iss: issuer,
-      sub: user.id,
+      sub: subjectForUser(env, user),
       aud: clientId,
       exp: now + 300,
       iat: now,
@@ -287,7 +288,7 @@ async function handleOidcToken(request, env) {
     env,
   );
 
-  return json({
+  return tokenJson({
     access_token: accessToken,
     token_type: 'Bearer',
     expires_in: 300,
@@ -964,13 +965,17 @@ function serializeUser(user) {
 
 function oidcClaimsForUser(user, env) {
   return {
-    sub: user.id,
+    sub: subjectForUser(env, user),
     email: user.email,
     email_verified: true,
     name: user.displayName || user.email,
     picture: user.photo || undefined,
     hd: workspaceDomainFor(env) || undefined,
   };
+}
+
+function subjectForUser(env, user) {
+  return env.OIDC_SUB_CLAIM === 'id' ? user.id : user.email;
 }
 
 function oidcUserAllowed(env, userEmail, loginHint) {
@@ -1122,6 +1127,16 @@ function json(payload, status = 200) {
 
 function oauthError(error, description, status = 400) {
   return json({ error, error_description: description }, status);
+}
+
+function tokenJson(payload) {
+  return new Response(JSON.stringify(payload), {
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+      pragma: 'no-cache',
+    },
+  });
 }
 
 function htmlError(title, message, status = 400) {
