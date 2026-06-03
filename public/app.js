@@ -211,7 +211,7 @@ function renderVerifyState(session) {
 function renderOidcState(context) {
   const account = document.querySelector('#oidc-account');
   const passkeyPanel = document.querySelector('#oidc-passkey-panel');
-  const bootstrapPanel = document.querySelector('#oidc-bootstrap-panel');
+  const bootstrapPanel = document.querySelector('#oidc-bootstrap');
   const finishPanel = document.querySelector('#oidc-finish-panel');
   const blockedPanel = document.querySelector('#oidc-blocked-panel');
   const codeField = document.querySelector('#bootstrap-code-field');
