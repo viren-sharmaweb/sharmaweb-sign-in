@@ -257,7 +257,9 @@ function renderOidcState(context) {
 
   if (context.hasPasskeys) {
     show(passkeyPanel);
-    setMessage('Use your passkey to continue to Google Workspace.');
+    setMessage(context.storeConfigured
+      ? 'Use your passkey to continue to Google Workspace.'
+      : 'Use your passkey to continue. Storage is not connected, so this passkey is only remembered in this browser session.');
     maybeAutoPromptPasskey();
     return;
   }
@@ -265,7 +267,9 @@ function renderOidcState(context) {
   if (context.canBootstrap) {
     codeField.classList.toggle('hidden', !context.bootstrapRequiresCode);
     show(bootstrapPanel);
-    setMessage('Create your first passkey for this Workspace account.');
+    setMessage(context.storeConfigured
+      ? 'Create your first passkey for this Workspace account.'
+      : 'Create your first passkey. Storage is not connected, so reusing it requires the same browser session until AUTH_STORE is attached.');
     return;
   }
 
