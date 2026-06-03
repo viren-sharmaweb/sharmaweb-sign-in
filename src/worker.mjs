@@ -253,9 +253,9 @@ async function handleOidcToken(request, env) {
     return oauthError('invalid_grant', 'client_id does not match the authorization request');
   }
 
-  const user = await loadUser(env, authCode.userId);
+  const user = (await loadUser(env, authCode.userId)) || authCode.user;
 
-  if (!user) {
+  if (!user?.email) {
     return oauthError('invalid_grant', 'User no longer exists');
   }
 
@@ -282,6 +282,7 @@ async function handleOidcToken(request, env) {
     {
       type: 'oidc_access_token',
       userId: user.id,
+      user: oidcClaimsForUser(user, env),
       clientId,
       exp: Date.now() + 300000,
     },
@@ -309,12 +310,13 @@ async function handleOidcUserinfo(request, env) {
   }
 
   const user = await loadUser(env, accessToken.userId);
+  const claims = user ? oidcClaimsForUser(user, env) : accessToken.user;
 
-  if (!user) {
+  if (!claims?.email) {
     return oauthError('invalid_token', 'User no longer exists', 401);
   }
 
-  return json(oidcClaimsForUser(user, env));
+  return json(claims);
 }
 
 async function handleOidcContext(env, session) {
@@ -516,6 +518,7 @@ async function handleSession(request, env, session) {
     authenticated: Boolean(user),
     googleConfigured: googleConfigured(env),
     oidcConfigured: oidcConfigured(env),
+    storeConfigured: Boolean(env.AUTH_STORE),
     rpName: rpNameFor(env),
     requirePasskeyAfterGoogle: requirePasskeyAfterGoogle(env),
     user: user ? serializeUser(user) : null,
@@ -725,6 +728,12 @@ async function buildOidcRedirect(request, env, pendingOidc, user) {
     {
       type: 'oidc_code',
       userId: user.id,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName || user.email,
+        photo: user.photo,
+      },
       clientId: pendingOidc.clientId,
       redirectUri: pendingOidc.redirectUri,
       scope: pendingOidc.scope,
@@ -975,7 +984,7 @@ function oidcClaimsForUser(user, env) {
 }
 
 function subjectForUser(env, user) {
-  return env.OIDC_SUB_CLAIM === 'id' ? user.id : user.email;
+  return env.OIDC_SUB_CLAIM === 'id' ? user.id || user.email : user.email;
 }
 
 function oidcUserAllowed(env, userEmail, loginHint) {
