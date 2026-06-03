@@ -1,6 +1,7 @@
 const message = document.querySelector('#message');
 
 let oidcContext = null;
+let autoPasskeyPromptStarted = false;
 
 document.addEventListener('DOMContentLoaded', () => {
   void hydratePage();
@@ -104,12 +105,7 @@ function bindOidcPage() {
 
     try {
       const result = await authenticateWithPasskey({});
-      if (result?.adminReview) {
-        await hydratePage();
-        setMessage('Admin verified. Review settings, then continue to Google Workspace.');
-        return;
-      }
-      redirectIfPresent(result);
+      await handleOidcPasskeyResult(result);
     } catch (error) {
       setMessage(error.message, true);
     }
@@ -127,8 +123,8 @@ function bindOidcPage() {
       });
       setMessage('Now register a passkey for future Workspace sign-ins...');
       await registerPasskey();
-      const result = await finishOidcSignIn();
-      redirectIfPresent(result);
+      await hydratePage();
+      setMessage('Passkey created. Click Continue to return to Google Workspace.');
     } catch (error) {
       setMessage(error.message, true);
       await hydratePage();
@@ -262,6 +258,7 @@ function renderOidcState(context) {
   if (context.hasPasskeys) {
     show(passkeyPanel);
     setMessage('Use your passkey to continue to Google Workspace.');
+    maybeAutoPromptPasskey();
     return;
   }
 
@@ -349,6 +346,44 @@ async function authenticateWithPasskey(payload) {
 
 function finishOidcSignIn() {
   return request('/api/oidc/finish', { method: 'POST' });
+}
+
+async function handleOidcPasskeyResult(result) {
+  if (result?.adminReview) {
+    await hydratePage();
+    setMessage('Admin verified. Review settings, then continue to Google Workspace.');
+    return;
+  }
+
+  if (result?.redirectTo) {
+    window.location.href = result.redirectTo;
+    return;
+  }
+
+  await hydratePage();
+}
+
+function maybeAutoPromptPasskey() {
+  if (autoPasskeyPromptStarted) {
+    return;
+  }
+
+  autoPasskeyPromptStarted = true;
+  window.setTimeout(async () => {
+    const passkeyPanel = document.querySelector('#oidc-passkey-panel');
+
+    if (!passkeyPanel || passkeyPanel.classList.contains('hidden')) {
+      return;
+    }
+
+    try {
+      setMessage('Looking for your passkey...');
+      const result = await authenticateWithPasskey({});
+      await handleOidcPasskeyResult(result);
+    } catch (_error) {
+      setMessage('Tap Sign in with passkey to continue.');
+    }
+  }, 450);
 }
 
 function prepareCreationOptions(options) {
