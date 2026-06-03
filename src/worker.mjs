@@ -119,6 +119,7 @@ function handleOidcDiscovery(request, env) {
     userinfo_endpoint: `${issuer}/oidc/userinfo`,
     jwks_uri: `${issuer}/.well-known/jwks.json`,
     response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
     subject_types_supported: ['public'],
     id_token_signing_alg_values_supported: ['RS256'],
     scopes_supported: ['openid', 'email', 'profile'],
@@ -200,9 +201,15 @@ async function handleOidcAuthorize(request, env, session) {
   };
 
   if (currentUser && oidcUserAllowed(env, currentUser.email, loginHint)) {
-    const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, currentUser);
-    delete session.pendingOidc;
-    const headers = new Headers({ location: redirectTo });
+    if (!adminEmailAllowed(env, currentUser.email)) {
+      const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, currentUser);
+      delete session.pendingOidc;
+      const headers = new Headers({ location: redirectTo });
+      await commitSessionCookie(headers, session, env, request);
+      return new Response(null, { status: 302, headers });
+    }
+
+    const headers = new Headers({ location: '/signin.html' });
     await commitSessionCookie(headers, session, env, request);
     return new Response(null, { status: 302, headers });
   }
@@ -257,7 +264,7 @@ async function handleOidcToken(request, env) {
   const idToken = await signJwt(
     {
       iss: issuer,
-      sub: user.id,
+      sub: subjectForUser(env, user),
       aud: clientId,
       exp: now + 300,
       iat: now,
@@ -281,7 +288,7 @@ async function handleOidcToken(request, env) {
     env,
   );
 
-  return json({
+  return tokenJson({
     access_token: accessToken,
     token_type: 'Bearer',
     expires_in: 300,
@@ -321,6 +328,7 @@ async function handleOidcContext(env, session) {
   const hint = normalizeEmail(pendingOidc.loginHint || currentUser?.email || '');
   const user = hint ? await findUserByEmail(env, hint) : null;
   const bootstrapAllowed = hint ? bootstrapAllowedForEmail(env, hint) : false;
+  const activeUser = currentUser || user;
 
   return json({
     pending: true,
@@ -332,6 +340,8 @@ async function handleOidcContext(env, session) {
     canBootstrap: !user && bootstrapAllowed,
     bootstrapRequiresCode: Boolean(env.BOOTSTRAP_CODE),
     passkeyRequired: Boolean(user?.passkeys.length),
+    isAdmin: Boolean(activeUser && adminEmailAllowed(env, activeUser.email)),
+    admin: adminContextFor(env),
   });
 }
 
@@ -685,6 +695,15 @@ async function handleAuthenticateVerify(request, env, session) {
   delete session.currentAuthenticationUserId;
 
   if (session.pendingOidc) {
+    if (adminEmailAllowed(env, expectedUser.email)) {
+      const headers = new Headers({ 'content-type': 'application/json' });
+      await commitSessionCookie(headers, session, env, request);
+      return new Response(
+        JSON.stringify({ user: serializeUser(expectedUser), adminReview: true }),
+        { headers },
+      );
+    }
+
     const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, expectedUser);
     delete session.pendingOidc;
     const headers = new Headers({ 'content-type': 'application/json' });
@@ -946,13 +965,17 @@ function serializeUser(user) {
 
 function oidcClaimsForUser(user, env) {
   return {
-    sub: user.id,
+    sub: subjectForUser(env, user),
     email: user.email,
     email_verified: true,
     name: user.displayName || user.email,
     picture: user.photo || undefined,
     hd: workspaceDomainFor(env) || undefined,
   };
+}
+
+function subjectForUser(env, user) {
+  return env.OIDC_SUB_CLAIM === 'id' ? user.id : user.email;
 }
 
 function oidcUserAllowed(env, userEmail, loginHint) {
@@ -989,6 +1012,26 @@ function bootstrapAllowedForEmail(env, email) {
   }
 
   return false;
+}
+
+function adminEmailAllowed(env, email) {
+  const normalizedEmail = normalizeEmail(email);
+  return Boolean(normalizedEmail && csv(env.ADMIN_EMAILS).map(normalizeEmail).includes(normalizedEmail));
+}
+
+function adminContextFor(env) {
+  return {
+    adminEmails: csv(env.ADMIN_EMAILS).map(normalizeEmail),
+    bootstrapEmails: csv(env.BOOTSTRAP_EMAILS).map(normalizeEmail),
+    allowDomainBootstrap: env.ALLOW_DOMAIN_BOOTSTRAP === 'true',
+    allowWithoutPasskey: env.ALLOW_OIDC_WITHOUT_PASSKEY === 'true',
+    requirePasskeyAfterGoogle: env.REQUIRE_PASSKEY_AFTER_GOOGLE === 'true',
+    workspaceDomain: workspaceDomainFor(env),
+    theme: {
+      name: env.RP_NAME || 'SharmaWeb Sign In',
+      accent: env.THEME_ACCENT || 'Pastel violet',
+    },
+  };
 }
 
 function oidcConfigured(env) {
@@ -1084,6 +1127,16 @@ function json(payload, status = 200) {
 
 function oauthError(error, description, status = 400) {
   return json({ error, error_description: description }, status);
+}
+
+function tokenJson(payload) {
+  return new Response(JSON.stringify(payload), {
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+      pragma: 'no-cache',
+    },
+  });
 }
 
 function htmlError(title, message, status = 400) {

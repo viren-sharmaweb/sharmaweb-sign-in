@@ -155,9 +155,29 @@ Cloudflare as:
 
 ```text
 OIDC_REDIRECT_URIS=<the redirect URI Google generated>
+OIDC_SUB_CLAIM=email
 ```
 
-Redeploy the Worker after changing variables.
+Redeploy the Worker after changing variables. By default, the OIDC `sub` claim is the user's Workspace email so Google can match `sub` and `email` to the same account. Set `OIDC_SUB_CLAIM=id` only if you need an opaque internal subject.
+
+
+### Admin review controls
+
+Set `ADMIN_EMAILS` to a comma-separated list of Workspace users who should see
+admin controls on the SharmaWeb sign-in page after passkey verification:
+
+```text
+ADMIN_EMAILS=admin@sharmaweb.com,security@sharmaweb.com
+```
+
+When one of those accounts reaches the OIDC sign-in page, the app keeps them on
+`/signin.html` after passkey verification and shows controls for reviewing
+accounts, sign-in methods, and theming before they continue to Google.
+
+Google Workspace may still bypass newer third-party SSO profiles for super-admin
+SP-initiated sign-ins. Keep a break-glass super admin outside SSO, and test admin
+controls with a non-super-admin admin-like user or any admin account that Google
+actually routes to the OIDC profile.
 
 ### 3. Assign the profile carefully
 
