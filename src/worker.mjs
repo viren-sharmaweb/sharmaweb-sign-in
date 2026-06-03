@@ -39,6 +39,10 @@ export default {
         return handleOidcUserinfo(request, env);
       }
 
+      if (url.pathname === '/oidc/logout' || url.pathname === '/logout') {
+        return handleBrowserLogout(request);
+      }
+
       if (url.pathname === '/auth/google') {
         return handleGoogleStart(request, env, session);
       }
@@ -117,6 +121,7 @@ function handleOidcDiscovery(request, env) {
     authorization_endpoint: `${issuer}/oidc/authorize`,
     token_endpoint: `${issuer}/oidc/token`,
     userinfo_endpoint: `${issuer}/oidc/userinfo`,
+    end_session_endpoint: `${issuer}/oidc/logout`,
     jwks_uri: `${issuer}/.well-known/jwks.json`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code'],
@@ -317,6 +322,32 @@ async function handleOidcUserinfo(request, env) {
   }
 
   return json(claims);
+}
+
+function handleBrowserLogout(request) {
+  const headers = new Headers({ location: logoutRedirectFor(request) });
+  clearSessionCookie(headers, request);
+  return new Response(null, { status: 302, headers });
+}
+
+function logoutRedirectFor(request) {
+  const url = new URL(request.url);
+  const fallback = '/signed-out.html';
+  const requested =
+    url.searchParams.get('post_logout_redirect_uri') ||
+    url.searchParams.get('continue') ||
+    url.searchParams.get('returnTo');
+
+  if (!requested) {
+    return fallback;
+  }
+
+  try {
+    const redirectUrl = new URL(requested, url.origin);
+    return redirectUrl.origin === url.origin ? redirectUrl.toString() : fallback;
+  } catch (_error) {
+    return fallback;
+  }
 }
 
 async function handleOidcContext(env, session) {

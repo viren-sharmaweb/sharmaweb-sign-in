@@ -179,6 +179,21 @@ SP-initiated sign-ins. Keep a break-glass super admin outside SSO, and test admi
 controls with a non-super-admin admin-like user or any admin account that Google
 actually routes to the OIDC profile.
 
+
+### Sign-out URL
+
+To clear the SharmaWeb IdP session when users sign out, set the Google Workspace
+SSO profile sign-out page URL to:
+
+```text
+https://login.sharmaweb.com/oidc/logout
+```
+
+The endpoint clears the signed SharmaWeb session cookie and sends users to
+`/signed-out.html`. If Google Workspace does not call the sign-out URL for a
+particular flow, users can visit the URL directly or use the local sign-out
+controls in the app.
+
 ### 3. Assign the profile carefully
 
 Assign the OIDC profile to a small test group first. Do not assign it to every
