@@ -200,9 +200,15 @@ async function handleOidcAuthorize(request, env, session) {
   };
 
   if (currentUser && oidcUserAllowed(env, currentUser.email, loginHint)) {
-    const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, currentUser);
-    delete session.pendingOidc;
-    const headers = new Headers({ location: redirectTo });
+    if (!adminEmailAllowed(env, currentUser.email)) {
+      const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, currentUser);
+      delete session.pendingOidc;
+      const headers = new Headers({ location: redirectTo });
+      await commitSessionCookie(headers, session, env, request);
+      return new Response(null, { status: 302, headers });
+    }
+
+    const headers = new Headers({ location: '/signin.html' });
     await commitSessionCookie(headers, session, env, request);
     return new Response(null, { status: 302, headers });
   }
@@ -321,6 +327,7 @@ async function handleOidcContext(env, session) {
   const hint = normalizeEmail(pendingOidc.loginHint || currentUser?.email || '');
   const user = hint ? await findUserByEmail(env, hint) : null;
   const bootstrapAllowed = hint ? bootstrapAllowedForEmail(env, hint) : false;
+  const activeUser = currentUser || user;
 
   return json({
     pending: true,
@@ -332,6 +339,8 @@ async function handleOidcContext(env, session) {
     canBootstrap: !user && bootstrapAllowed,
     bootstrapRequiresCode: Boolean(env.BOOTSTRAP_CODE),
     passkeyRequired: Boolean(user?.passkeys.length),
+    isAdmin: Boolean(activeUser && adminEmailAllowed(env, activeUser.email)),
+    admin: adminContextFor(env),
   });
 }
 
@@ -685,6 +694,15 @@ async function handleAuthenticateVerify(request, env, session) {
   delete session.currentAuthenticationUserId;
 
   if (session.pendingOidc) {
+    if (adminEmailAllowed(env, expectedUser.email)) {
+      const headers = new Headers({ 'content-type': 'application/json' });
+      await commitSessionCookie(headers, session, env, request);
+      return new Response(
+        JSON.stringify({ user: serializeUser(expectedUser), adminReview: true }),
+        { headers },
+      );
+    }
+
     const redirectTo = await buildOidcRedirect(request, env, session.pendingOidc, expectedUser);
     delete session.pendingOidc;
     const headers = new Headers({ 'content-type': 'application/json' });
@@ -989,6 +1007,26 @@ function bootstrapAllowedForEmail(env, email) {
   }
 
   return false;
+}
+
+function adminEmailAllowed(env, email) {
+  const normalizedEmail = normalizeEmail(email);
+  return Boolean(normalizedEmail && csv(env.ADMIN_EMAILS).map(normalizeEmail).includes(normalizedEmail));
+}
+
+function adminContextFor(env) {
+  return {
+    adminEmails: csv(env.ADMIN_EMAILS).map(normalizeEmail),
+    bootstrapEmails: csv(env.BOOTSTRAP_EMAILS).map(normalizeEmail),
+    allowDomainBootstrap: env.ALLOW_DOMAIN_BOOTSTRAP === 'true',
+    allowWithoutPasskey: env.ALLOW_OIDC_WITHOUT_PASSKEY === 'true',
+    requirePasskeyAfterGoogle: env.REQUIRE_PASSKEY_AFTER_GOOGLE === 'true',
+    workspaceDomain: workspaceDomainFor(env),
+    theme: {
+      name: env.RP_NAME || 'SharmaWeb Sign In',
+      accent: env.THEME_ACCENT || 'Pastel violet',
+    },
+  };
 }
 
 function oidcConfigured(env) {

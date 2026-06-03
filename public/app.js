@@ -96,12 +96,19 @@ function bindOidcPage() {
   const bootstrapForm = document.querySelector('#oidc-bootstrap');
   const finishButton = document.querySelector('#oidc-finish');
   const signOutButton = document.querySelector('#oidc-sign-out');
+  const adminToggle = document.querySelector('#oidc-admin-toggle');
+  const adminTools = document.querySelector('#oidc-admin-tools');
 
   passkeyButton?.addEventListener('click', async () => {
     setMessage('Glide through your passkey prompt to continue...');
 
     try {
       const result = await authenticateWithPasskey({});
+      if (result?.adminReview) {
+        await hydratePage();
+        setMessage('Admin verified. Review settings, then continue to Google Workspace.');
+        return;
+      }
       redirectIfPresent(result);
     } catch (error) {
       setMessage(error.message, true);
@@ -142,6 +149,10 @@ function bindOidcPage() {
   signOutButton?.addEventListener('click', async () => {
     await request('/api/sign-out', { method: 'POST' });
     window.location.reload();
+  });
+
+  adminToggle?.addEventListener('click', () => {
+    adminTools?.classList.toggle('hidden');
   });
 }
 
@@ -214,6 +225,7 @@ function renderOidcState(context) {
   const bootstrapPanel = document.querySelector('#oidc-bootstrap');
   const finishPanel = document.querySelector('#oidc-finish-panel');
   const blockedPanel = document.querySelector('#oidc-blocked-panel');
+  const adminPanel = document.querySelector('#oidc-admin-panel');
   const codeField = document.querySelector('#bootstrap-code-field');
 
   if (!context.pending) {
@@ -231,9 +243,17 @@ function renderOidcState(context) {
     </div>
   `;
 
-  hide(passkeyPanel, bootstrapPanel, finishPanel, blockedPanel);
+  hide(passkeyPanel, bootstrapPanel, finishPanel, blockedPanel, adminPanel);
+  renderAdminPanel(context);
 
   if (context.authenticated && context.user?.passkeyCount > 0) {
+    if (context.isAdmin) {
+      show(adminPanel);
+      show(finishPanel);
+      setMessage('Admin verified. Review settings, then continue to Google Workspace.');
+      return;
+    }
+
     show(finishPanel);
     setMessage('You are verified. Continue back to Google Workspace.');
     return;
@@ -257,6 +277,33 @@ function renderOidcState(context) {
     'This account is not enrolled yet. Ask an admin to add it to BOOTSTRAP_EMAILS or enable domain bootstrap.',
     true,
   );
+}
+
+function renderAdminPanel(context) {
+  if (!context?.isAdmin) {
+    return;
+  }
+
+  const accounts = document.querySelector('#admin-accounts-summary');
+  const methods = document.querySelector('#admin-methods-summary');
+  const theme = document.querySelector('#admin-theme-summary');
+  const admin = context.admin || {};
+
+  if (accounts) {
+    const adminCount = admin.adminEmails?.length || 0;
+    const bootstrapCount = admin.bootstrapEmails?.length || 0;
+    accounts.textContent = `${adminCount} admin(s), ${bootstrapCount} bootstrap account(s).`;
+  }
+
+  if (methods) {
+    methods.textContent = admin.allowWithoutPasskey
+      ? 'Passkeys are recommended, but not required.'
+      : 'Passkeys are required before continuing to Google.';
+  }
+
+  if (theme) {
+    theme.textContent = `${admin.theme?.name || 'SharmaWeb'} using ${admin.theme?.accent || 'pastel'} accents.`;
+  }
 }
 
 async function registerPasskey() {

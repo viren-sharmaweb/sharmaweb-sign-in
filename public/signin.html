@@ -23,6 +23,26 @@
 
         <div id="oidc-account" class="account-row soft-row"></div>
 
+        <div id="oidc-admin-panel" class="motion-panel admin-panel hidden">
+          <button id="oidc-admin-toggle" class="secondary" type="button">
+            Manage accounts, sign-in methods, and theming
+          </button>
+          <div id="oidc-admin-tools" class="admin-tools hidden">
+            <article>
+              <span>Accounts</span>
+              <strong id="admin-accounts-summary">Review enrolled admins and bootstrap users.</strong>
+            </article>
+            <article>
+              <span>Sign-in methods</span>
+              <strong id="admin-methods-summary">Passkeys protect Workspace sign-ins.</strong>
+            </article>
+            <article>
+              <span>Theming</span>
+              <strong id="admin-theme-summary">Pastel SharmaWeb theme is active.</strong>
+            </article>
+          </div>
+        </div>
+
         <div id="oidc-passkey-panel" class="motion-panel hidden">
           <button id="oidc-passkey">Continue with passkey</button>
         </div>
