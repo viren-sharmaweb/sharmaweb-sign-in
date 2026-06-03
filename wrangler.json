@@ -6,5 +6,21 @@
   "assets": {
     "binding": "ASSETS",
     "directory": "./public"
+  },
+  "vars": {
+    "ALLOW_DOMAIN_BOOTSTRAP": "false",
+    "ALLOW_OIDC_WITHOUT_PASSKEY": "false",
+    "ADMIN_EMAILS": "viren@sharmaweb.com,test@sharmaweb.com",
+    "BOOTSTRAP_EMAILS": "test@sharmaweb.com",
+    "GOOGLE_CLIENT_ID": "1033939126989-86admpatskc3vnhte1iqc0gqm8isfit3.apps.googleusercontent.com",
+    "OIDC_CLIENT_ID": "sharmaweb-workspace",
+    "OIDC_REDIRECT_URIS": "https://accounts.google.com/oidcrp/04bjh9k84koyha8/cb",
+    "OIDC_SUB_CLAIM": "email",
+    "ORIGIN": "https://login.sharmaweb.com",
+    "REQUIRE_PASSKEY_AFTER_GOOGLE": "false",
+    "RP_ID": "login.sharmaweb.com",
+    "RP_NAME": "SharmaWeb Sign In",
+    "THEME_ACCENT": "Pastel violet",
+    "WORKSPACE_DOMAIN": "sharmaweb.com"
   }
 }
